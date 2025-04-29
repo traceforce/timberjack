@@ -225,10 +225,17 @@ func (l *Logger) openNew() error {
 	info, err := osStat(name)
 	if err == nil {
 		mode = info.Mode()
-		newname := backupName(name, l.LocalTime)
+
+		reason := "size"
+		if l.shouldTimeRotate() {
+			reason = "time"
+		}
+
+		newname := backupName(name, l.LocalTime, reason)
 		if err := os.Rename(name, newname); err != nil {
 			return fmt.Errorf("can't rename log file: %s", err)
 		}
+
 		if err := chown(name, info); err != nil {
 			return err
 		}
@@ -243,10 +250,19 @@ func (l *Logger) openNew() error {
 	return nil
 }
 
-// backupName creates a new filename from the given name, inserting a timestamp
-// between the filename and the extension, using the local time if requested
-// (otherwise UTC).
-func backupName(name string, local bool) string {
+// shouldTimeRotate checks if the time-based rotation interval has elapsed
+// since the last rotation.
+func (l *Logger) shouldTimeRotate() bool {
+	if l.RotationInterval == 0 {
+		return false
+	}
+	return time.Since(l.lastRotationTime) >= l.RotationInterval
+}
+
+// backupName creates a new backup filename by inserting a timestamp and a rotation reason
+// ("time" or "size") between the filename prefix and the extension.
+// It uses the local time if requested (otherwise UTC).
+func backupName(name string, local bool, reason string) string {
 	dir := filepath.Dir(name)
 	filename := filepath.Base(name)
 	ext := filepath.Ext(filename)
@@ -256,7 +272,7 @@ func backupName(name string, local bool) string {
 		t = t.UTC()
 	}
 	timestamp := t.Format(backupTimeFormat)
-	return filepath.Join(dir, fmt.Sprintf("%s-%s%s", prefix, timestamp, ext))
+	return filepath.Join(dir, fmt.Sprintf("%s-%s-%s%s", prefix, timestamp, reason, ext))
 }
 
 // openExistingOrNew opens the existing logfile if it exists and the current write
@@ -417,9 +433,9 @@ func (l *Logger) oldLogFiles() ([]logInfo, error) {
 	return logFiles, nil
 }
 
-// timeFromName extracts the formatted time from the filename by stripping off
-// the filename's prefix and extension. This prevents someone's filename from
-// confusing time.parse.
+// timeFromName extracts the formatted timestamp from the backup filename by stripping off
+// the filename's prefix, rotation reason suffix ("-time" or "-size"), and extension.
+// This ensures correct parsing even if filenames include additional information after the timestamp.
 func (l *Logger) timeFromName(filename, prefix, ext string) (time.Time, error) {
 	if !strings.HasPrefix(filename, prefix) {
 		return time.Time{}, errors.New("mismatched prefix")
@@ -427,7 +443,15 @@ func (l *Logger) timeFromName(filename, prefix, ext string) (time.Time, error) {
 	if !strings.HasSuffix(filename, ext) {
 		return time.Time{}, errors.New("mismatched extension")
 	}
-	ts := filename[len(prefix) : len(filename)-len(ext)]
+
+	base := filename[len(prefix) : len(filename)-len(ext)]
+
+	idx := strings.LastIndex(base, "-")
+	if idx == -1 {
+		return time.Time{}, errors.New("invalid filename format")
+	}
+
+	ts := base[:idx]
 	return time.Parse(backupTimeFormat, ts)
 }
 
