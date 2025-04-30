@@ -150,7 +150,7 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 	}
 
 	// 1. Time-based rotation
-	if l.RotationInterval > 0 && time.Since(l.lastRotationTime) >= l.RotationInterval {
+	if l.RotationInterval > 0 && currentTime().Sub(l.lastRotationTime) >= l.RotationInterval {
 		if err := l.rotate(); err != nil {
 			return 0, err
 		}
