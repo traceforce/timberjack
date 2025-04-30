@@ -149,7 +149,7 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 		l.lastRotationTime = currentTime()
 	}
 
-	// 1. Time-based rotation
+	// Time-based rotation
 	if l.RotationInterval > 0 && currentTime().Sub(l.lastRotationTime) >= l.RotationInterval {
 		if err := l.rotate(); err != nil {
 			return 0, err
@@ -157,7 +157,7 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 		l.lastRotationTime = currentTime()
 	}
 
-	// 2. Size-based rotation
+	// Size-based rotation
 	if l.size+writeLen > l.max() {
 		if err := l.rotate(); err != nil {
 			return 0, err
