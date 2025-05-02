@@ -2,9 +2,9 @@
 
 ### Timberjack is a Go package for writing logs to rolling files.
 
+Timberjack is a forked and enhanced version of [`lumberjack`](https://github.com/natefinch/lumberjack), adding features such as time-based rotation and better testability.
 Package `timberjack` provides a rolling logger with support for size-based and time-based log rotation.
 
----
 
 ## Installation
 
@@ -12,7 +12,6 @@ Package `timberjack` provides a rolling logger with support for size-based and t
 go get github.com/DeRuina/timberjack
 ```
 
----
 
 ## Import
 
@@ -27,7 +26,6 @@ component that manages log file writing and rotation. It plays well with any log
 > ⚠️ Timberjack assumes that only one process writes to the log file. Using the same configuration from multiple
 > processes on the same machine may result in unexpected behavior.
 
----
 
 ## Example
 
@@ -37,7 +35,7 @@ To use timberjack with the standard library's `log` package:
 log.SetOutput(&timberjack.Logger{
     Filename:         "/var/log/myapp/foo.log",
     MaxSize:          500,            // megabytes
-    MaxBackups:       3,
+    MaxBackups:       3,              // backups
     MaxAge:           28,             // days
     Compress:         true,           // disabled by default
     LocalTime:        true,           // disabled by default
@@ -60,7 +58,6 @@ go func() {
 }()
 ```
 
----
 
 ## Logger Configuration
 
@@ -76,7 +73,6 @@ type Logger struct {
 }
 ```
 
----
 
 ## How Rotation Works
 
@@ -97,8 +93,6 @@ For example:
 /var/log/myapp/foo-2025-04-30T22-15-42.123-time.log
 ```
 
----
-
 ## Log Cleanup
 
 When a new log file is created:
@@ -106,13 +100,7 @@ When a new log file is created:
 - Files older than `MaxAge` days are deleted.
 - If `Compress` is true, older files are gzip-compressed.
 
----
 
 ## License
 
 MIT
-
----
-
-Timberjack is a forked and enhanced version of [`lumberjack`](https://github.com/natefinch/lumberjack), adding features such as time-based rotation and better testability.
-
