@@ -4,9 +4,7 @@
 package timberjack
 
 import (
-	"fmt"
 	"os"
-	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -189,10 +187,6 @@ type fakeFS struct {
 
 func newFakeFS() *fakeFS {
 	return &fakeFS{files: make(map[string]fakeFile)}
-}
-
-func backupFileWithReason(dir, reason string) string {
-	return filepath.Join(dir, fmt.Sprintf("foobar-%s-%s.log", fakeTime().UTC().Format("2006-01-02T15-04-05.000"), reason))
 }
 
 func (fs *fakeFS) Chown(name string, uid, gid int) error {
