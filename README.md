@@ -1,4 +1,5 @@
-# timberjack
+# timberjack [![Go Reference](https://pkg.go.dev/badge/github.com/DeRuina/timberjack.svg)](https://pkg.go.dev/github.com/DeRuina/timberjack) [![Go Report Card](https://goreportcard.com/badge/github.com/DeRuina/timberjack)](https://goreportcard.com/report/github.com/DeRuina/timberjack) ![Build Status](https://github.com/DeRuina/timberjack/actions/workflows/ci.yaml/badge.svg) ![Version](https://img.shields.io/github/v/tag/DeRuina/timberjack?sort=semver)
+
 
 ### Timberjack is a Go package for writing logs to rolling files.
 
@@ -37,8 +38,8 @@ log.SetOutput(&timberjack.Logger{
     MaxSize:          500,            // megabytes
     MaxBackups:       3,              // backups
     MaxAge:           28,             // days
-    Compress:         true,           // disabled by default
-    LocalTime:        true,           // disabled by default
+    Compress:         true,           // default: false
+    LocalTime:        true,           // default: false
     RotationInterval: time.Hour * 24, // rotate daily
 })
 ```
