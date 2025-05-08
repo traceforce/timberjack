@@ -78,7 +78,8 @@ type Logger struct {
 ## How Rotation Works
 
 1. **Size-Based**: If a write causes the log file to exceed `MaxSize`, it is rotated.
-2. **Time-Based**: If `RotationInterval` has elapsed since the last rotation, it is rotated.
+2. **Time-Based**: If `RotationInterval` has elapsed since the log file was created, it is rotated.
+   The rotated filename reflects the **start time** of the log file (when it was first opened), not the time it was renamed.
 3. **Manual**: You can call `Logger.Rotate()` directly to force a rotation.
 
 Rotated files are renamed using the pattern:
