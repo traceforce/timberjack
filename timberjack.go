@@ -108,6 +108,7 @@ type Logger struct {
 	size             int64
 	file             *os.File
 	lastRotationTime time.Time // lastRotationTime records the last time a rotation happened.
+	logStartTime     time.Time // start time of the current logging period.
 
 	mu        sync.Mutex
 	millCh    chan bool
@@ -231,7 +232,8 @@ func (l *Logger) openNew() error {
 			reason = "time"
 		}
 
-		newname := backupName(name, l.LocalTime, reason)
+		l.logStartTime = currentTime()
+		newname := backupName(name, l.LocalTime, reason, l.logStartTime)
 		if err := os.Rename(name, newname); err != nil {
 			return fmt.Errorf("can't rename log file: %s", err)
 		}
@@ -239,6 +241,8 @@ func (l *Logger) openNew() error {
 		if err := chown(name, info); err != nil {
 			return err
 		}
+	} else {
+		l.logStartTime = currentTime()
 	}
 
 	f, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
@@ -262,12 +266,12 @@ func (l *Logger) shouldTimeRotate() bool {
 // backupName creates a new backup filename by inserting a timestamp and a rotation reason
 // ("time" or "size") between the filename prefix and the extension.
 // It uses the local time if requested (otherwise UTC).
-func backupName(name string, local bool, reason string) string {
+func backupName(name string, local bool, reason string, t time.Time) string {
 	dir := filepath.Dir(name)
 	filename := filepath.Base(name)
 	ext := filepath.Ext(filename)
 	prefix := filename[:len(filename)-len(ext)]
-	t := currentTime()
+
 	if !local {
 		t = t.UTC()
 	}
@@ -300,6 +304,7 @@ func (l *Logger) openExistingOrNew(writeLen int) error {
 	}
 	l.file = file
 	l.size = info.Size()
+	l.logStartTime = currentTime()
 	return nil
 }
 
