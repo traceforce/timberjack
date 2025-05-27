@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    name: Go ${{ matrix.go-version }}
+    name: Go versions
     runs-on: ubuntu-latest
 
     strategy:
