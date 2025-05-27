@@ -103,6 +103,12 @@ When a new log file is created:
 - If `Compress` is true, older files are gzip-compressed.
 
 
+## Contributing
+
+We welcome contributions!  
+Please see our [contributing guidelines](CONTRIBUTING.md) before submitting a pull request.
+
+
 ## License
 
 MIT
