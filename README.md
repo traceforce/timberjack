@@ -96,7 +96,7 @@ type Logger struct {
 
 1. **Size-Based**: If a write operation causes the current log file to exceed `MaxSize`, the file is rotated before the write. The backup filename will include `-size` as the reason.
 2. **Time-Based**: If `RotationInterval` is set (e.g., `time.Hour * 24` for daily rotation) and this duration has passed since the last rotation (of any type that updates the interval timer), the file is rotated upon the next write. The backup filename will include `-time` as the reason.
-3. **Scheduled Minute-Based**: If `RotateAtMinutes` is configured (e.g., `[]int{0, 30}` to rotate at `HH:00:00` and `HH:30:00`), a dedicated goroutine will trigger a rotation when the current time matches one of these minute marks. This rotation also uses `-time` as the reason in the backup filename.
+3. **Scheduled Minute-Based**: If `RotateAtMinutes` is configured (e.g., `[]int{0, 30}` the rotation will happen every hour at `HH:00:00` and `HH:30:00`), a dedicated goroutine will trigger a rotation when the current time matches one of these minute marks. This rotation also uses `-time` as the reason in the backup filename.
 4. **Manual**: You can call `Logger.Rotate()` directly to force a rotation at any time. The reason in the backup filename will be `"-time"` if an interval rotation was also due, otherwise it defaults to `"-size"`.
 
 Rotated files are renamed using the pattern:
@@ -112,6 +112,31 @@ For example:
 /var/log/myapp/foo-2025-04-30T22-15-42.123-time.log
 /var/log/myapp/foo-2025-05-01T10:30:00.000-time.log.gz (if scheduled at HH:30 and compressed)
 ```
+
+## ⚠️ Rotation Notes & Warnings
+
+* **Silent Ignoring of Invalid `RotateAtMinutes` Values**  
+  Values outside the valid range (`0–59`) or duplicates in `RotateAtMinutes` are silently ignored. No warnings or errors will be logged. This allows the program to continue safely, but the rotation behavior may not match your expectations if values are invalid.
+
+* **Logger Must Be Closed**  
+  Always call `logger.Close()` when done logging. This shuts down internal goroutines used for scheduled rotation and cleanup. Failing to close the logger can result in orphaned background processes, open file handles, and memory leaks.
+
+* **Size-Based Rotation Is Always Active**  
+  Regardless of `RotationInterval` or `RotateAtMinutes`, size-based rotation is always enforced. If a write causes the log to exceed `MaxSize` (default: 100MB), it triggers an immediate rotation.
+
+* **If Only `RotationInterval` Is Set**  
+  The logger will rotate after the configured time has passed since the **last rotation**, regardless of file size progression.
+
+* **If Only `RotateAtMinutes` Is Set**  
+  The logger will rotate **at the clock times** specified, regardless of file size or duration passed. This is handled by a background goroutine. Rotated logs might be even empty if no write has occurred. 
+
+* **If Both Are Set**  
+  Both time-based strategies (`RotationInterval` and `RotateAtMinutes`) are evaluated. Whichever condition occurs first triggers rotation. However:
+
+  * Both update the internal `lastRotationTime` field.
+  * This means if a rotation happens due to `RotateAtMinutes`, it resets the interval timer, potentially **delaying or preventing** a `RotationInterval`-based rotation.
+
+  This behavior ensures you won’t get redundant rotations, but it may make `RotationInterval` feel unpredictable if `RotateAtMinutes` is also configured.
 
 ## Log Cleanup
 
