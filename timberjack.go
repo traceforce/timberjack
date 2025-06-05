@@ -142,6 +142,8 @@ var (
 	// variable so tests can mock it out and not need to write megabytes of data
 	// to disk.
 	megabyte = 1024 * 1024
+
+	osRename = os.Rename
 )
 
 // Write implements io.Writer.
@@ -448,7 +450,7 @@ func (l *Logger) openNew(reasonForBackup string) error {
 
 		rotationTimeForBackup := currentTime()
 		newname := backupName(name, l.LocalTime, reasonForBackup, rotationTimeForBackup)
-		if errRename := os.Rename(name, newname); errRename != nil {
+		if errRename := osRename(name, newname); errRename != nil {
 			return fmt.Errorf("can't rename log file: %s", errRename)
 		}
 		l.logStartTime = rotationTimeForBackup

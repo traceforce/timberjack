@@ -8,7 +8,7 @@ import (
 
 var osChown = os.Chown // Keep for testing
 
-func chown(name string, info os.FileInfo) error {
+var chown = func(name string, info os.FileInfo) error {
 	//// Should not be opening and truncating the file. It should just perform the osChown operation on the existing file name.
 	//// This is the primary cause of tests seeing 0 bytes.
 	// f, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
