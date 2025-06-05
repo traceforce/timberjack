@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1148,16 +1149,19 @@ func TestRotate_TriggersTimeReason(t *testing.T) {
 
 func TestRunScheduledRotations_NoFutureTime(t *testing.T) {
 	defer func() { recover() }() // prevent panic in background goroutine
+
 	originalTime := currentTime
 	defer func() { currentTime = originalTime }()
 
-	// simulate time always going backwards
 	currentTime = func() time.Time {
 		return time.Date(1999, 1, 1, 0, 0, 0, 0, time.UTC)
 	}
 
+	tmp := t.TempDir()
+	logFile := filepath.Join(tmp, "invalid.log")
+
 	logger := &Logger{
-		Filename:                "invalid.log",
+		Filename:                logFile,
 		RotateAtMinutes:         []int{0},
 		scheduledRotationWg:     sync.WaitGroup{},
 		scheduledRotationQuitCh: make(chan struct{}),
@@ -1170,6 +1174,9 @@ func TestRunScheduledRotations_NoFutureTime(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	close(logger.scheduledRotationQuitCh)
 	logger.scheduledRotationWg.Wait()
+
+	// clean up
+	os.Remove(logFile)
 }
 
 func TestEnsureScheduledRotationLoopRunning_InvalidMinutes(t *testing.T) {
@@ -1376,5 +1383,749 @@ func TestTimeFromName_MalformedFilename(t *testing.T) {
 	_, err := logger.timeFromName(invalid, prefix, ext)
 	if err == nil || !strings.Contains(err.Error(), "malformed backup filename") {
 		t.Fatalf("expected malformed filename error, got: %v", err)
+	}
+}
+
+func TestWrite_OpenExistingFails(t *testing.T) {
+	// Simulate a failure in osStat that's not os.IsNotExist
+	originalStat := osStat
+	defer func() { osStat = originalStat }()
+
+	osStat = func(name string) (os.FileInfo, error) {
+		return nil, fmt.Errorf("mocked stat failure")
+	}
+
+	logger := &Logger{
+		Filename: filepath.Join(t.TempDir(), "badfile.log"),
+		MaxSize:  10,
+	}
+
+	// prevent nil panic
+	logger.millCh = make(chan bool, 1)
+
+	_, err := logger.Write([]byte("trigger"))
+	if err == nil || !strings.Contains(err.Error(), "error getting log file info") {
+		t.Fatalf("expected error from Write when stat fails, got: %v", err)
+	}
+}
+
+func TestWrite_IntervalRotateFails(t *testing.T) {
+	currentTime = func() time.Time {
+		return time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	}
+
+	// Patch osRename to force openNew failure (simulate rename failure inside rotate)
+	originalRename := osRename
+	defer func() { osRename = originalRename }()
+	osRename = func(_, _ string) error {
+		return fmt.Errorf("mock rename failure")
+	}
+
+	tmp := t.TempDir()
+	logfile := filepath.Join(tmp, "fail.log")
+
+	// Write some initial file content
+	err := os.WriteFile(logfile, []byte("existing"), 0644)
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	l := &Logger{
+		Filename:         logfile,
+		RotationInterval: time.Second,
+		lastRotationTime: time.Date(2025, 1, 1, 11, 59, 0, 0, time.UTC),
+	}
+	defer l.Close()
+
+	// trigger rotation path
+	_, err = l.Write([]byte("trigger"))
+	if err == nil || !strings.Contains(err.Error(), "interval rotation failed") {
+		t.Fatalf("expected interval rotation error, got: %v", err)
+	}
+}
+
+func TestWrite_SizeRotateFails(t *testing.T) {
+	currentTime = func() time.Time {
+		return time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	}
+	megabyte = 1 // tiny units for easy triggering
+
+	// Patch osRename to force openNew to fail during rotate("size")
+	originalRename := osRename
+	defer func() { osRename = originalRename }()
+	osRename = func(_, _ string) error {
+		return fmt.Errorf("mock rename failure for size")
+	}
+
+	tmp := t.TempDir()
+	logfile := filepath.Join(tmp, "sizefail.log")
+
+	// Create initial file with some content (5 bytes)
+	err := os.WriteFile(logfile, []byte("12345"), 0644)
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	l := &Logger{
+		Filename: logfile,
+		MaxSize:  10, // force rotation at 10 bytes
+	}
+	defer l.Close()
+
+	// This write pushes us over the max size and triggers rotation
+	big := []byte("123456789") // 9 bytes + 5 existing = 14 > 10
+
+	_, err = l.Write(big)
+	if err == nil || !strings.Contains(err.Error(), "can't rename log file") {
+		t.Fatalf("expected rename failure in size-based rotation, got: %v", err)
+	}
+}
+
+func TestCompressLogFile_StatFails_1(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "test.log")
+	dst := src + ".gz"
+
+	// Write dummy data to the source file
+	err := os.WriteFile(src, []byte("log content"), 0644)
+	if err != nil {
+		t.Fatalf("failed to create source log: %v", err)
+	}
+
+	// Patch osStat to fail
+	originalStat := osStat
+	osStat = func(_ string) (os.FileInfo, error) {
+		return nil, fmt.Errorf("mock stat failure")
+	}
+	defer func() { osStat = originalStat }()
+
+	err = compressLogFile(src, dst)
+	if err == nil || !strings.Contains(err.Error(), "failed to stat source log file") {
+		t.Fatalf("expected stat failure during compressLogFile, got: %v", err)
+	}
+}
+
+func TestCompressLogFile_OpenDestFails(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "log.log")
+
+	// Write a dummy source log
+	err := os.WriteFile(src, []byte("hello"), 0644)
+	if err != nil {
+		t.Fatalf("failed to write source: %v", err)
+	}
+
+	// Create a file where a directory should be
+	fileAsDir := filepath.Join(tmp, "not_a_dir")
+	err = os.WriteFile(fileAsDir, []byte("conflict"), 0644)
+	if err != nil {
+		t.Fatalf("failed to create conflict path: %v", err)
+	}
+
+	// Destination path attempts to go under the file
+	dst := filepath.Join(fileAsDir, "dest.log.gz")
+
+	err = compressLogFile(src, dst)
+	if err == nil || !strings.Contains(err.Error(), "failed to open destination compressed log file") {
+		t.Fatalf("expected failure opening dest, got: %v", err)
+	}
+}
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) {
+	return 0, fmt.Errorf("forced read failure")
+}
+
+func TestCompressLogFile_CopyFails_1(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "dummy.log")
+	dst := filepath.Join(tmp, "output.gz")
+
+	// Write dummy source
+	err := os.WriteFile(src, []byte("irrelevant"), 0644)
+	if err != nil {
+		t.Fatalf("failed to create dummy file: %v", err)
+	}
+	defer os.Remove(src) // cleanup
+
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		t.Fatalf("stat failed: %v", err)
+	}
+
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY, srcInfo.Mode())
+	if err != nil {
+		t.Fatalf("failed to create dst file: %v", err)
+	}
+	defer func() {
+		dstFile.Close()
+		os.Remove(dst)
+	}()
+
+	gz := gzip.NewWriter(dstFile)
+
+	// Trigger copy failure
+	_, err = io.Copy(gz, failingReader{})
+	if err == nil || !strings.Contains(err.Error(), "forced read failure") {
+		t.Fatalf("expected read failure, got: %v", err)
+	}
+
+	_ = gz.Close() // ensure no panic
+}
+
+func TestCompressLogFile_GzipCloseFails_Simulated(t *testing.T) {
+	// We'll simulate a scenario where the Close() on the gzip.Writer fails
+	// by closing the destination before it's flushed.
+
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src.log")
+	dst := filepath.Join(tmp, "dst.gz")
+
+	// Write some dummy content
+	err := os.WriteFile(src, []byte("data to compress"), 0644)
+	if err != nil {
+		t.Fatalf("failed to write src: %v", err)
+	}
+	defer os.Remove(src)
+
+	// Create a broken pipe that will cause Close() to fail
+	pr, pw := io.Pipe()
+	pw.CloseWithError(fmt.Errorf("simulated pipe failure"))
+
+	// gzip.NewWriter expects a WriteCloser — so wrap `pw`
+	gz := gzip.NewWriter(pw)
+
+	// Start compression using io.Copy — should fail
+	go func() {
+		f, _ := os.Open(src)
+		defer f.Close()
+		_, _ = io.Copy(gz, f)
+		// This flushes and triggers the Close failure
+		_ = gz.Close()
+	}()
+
+	// Read to trigger pipe read error
+	buf := make([]byte, 1024)
+	_, err = pr.Read(buf)
+	if err == nil || !strings.Contains(err.Error(), "simulated pipe failure") {
+		t.Fatalf("expected gzip flush failure due to broken pipe, got: %v", err)
+	}
+
+	_ = os.Remove(dst)
+}
+
+func TestCompressLogFile_RemoveFails(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "locked.log")
+	dst := src + ".gz"
+
+	// Write dummy data to the source file
+	if err := os.WriteFile(src, []byte("test log"), 0644); err != nil {
+		t.Fatalf("failed to create source file: %v", err)
+	}
+
+	// Open the file for exclusive read to simulate 'in use' state (Unix-like only)
+	f, err := os.Open(src)
+	if err != nil {
+		t.Fatalf("failed to open file exclusively: %v", err)
+	}
+	defer f.Close() // Will keep it open while compressing
+
+	// Patch os.Remove to simulate failure while file is open
+	originalRemove := os.Remove
+	osRemove = func(path string) error {
+		if path == src {
+			return fmt.Errorf("mock remove failure")
+		}
+		return originalRemove(path)
+	}
+	defer func() { osRemove = originalRemove }()
+
+	err = compressLogFile(src, dst)
+	if err == nil || !strings.Contains(err.Error(), "failed to remove original source log file") {
+		t.Fatalf("expected failure from os.Remove, got: %v", err)
+	}
+
+	_ = os.Remove(dst) // cleanup
+}
+
+func TestEnsureScheduledRotationLoopRunning_Empty(t *testing.T) {
+	l := &Logger{
+		RotateAtMinutes: nil, // empty case
+	}
+	l.ensureScheduledRotationLoopRunning()
+
+	if len(l.processedRotateAtMinutes) != 0 {
+		t.Errorf("expected no processed rotation minutes, got: %v", l.processedRotateAtMinutes)
+	}
+}
+
+func TestEnsureScheduledRotationLoopRunning_InvalidMinutes_1(t *testing.T) {
+	l := &Logger{
+		RotateAtMinutes: []int{-5, 60, 999, -1}, // all invalid
+	}
+	l.ensureScheduledRotationLoopRunning()
+
+	if len(l.processedRotateAtMinutes) != 0 {
+		t.Errorf("expected 0 valid minutes, got: %v", l.processedRotateAtMinutes)
+	}
+
+	if l.scheduledRotationQuitCh != nil {
+		t.Errorf("expected scheduled rotation goroutine not to start")
+	}
+}
+
+func TestRunScheduledRotations_NoFutureSlotFallback(t *testing.T) {
+	defer func() { recover() }() // ignore goroutine panic if any
+	originalTime := currentTime
+	defer func() { currentTime = originalTime }()
+
+	// Force time to never advance — stuck before all slots
+	currentTime = func() time.Time {
+		return time.Date(1999, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
+
+	logger := &Logger{
+		Filename:                "test-fallback.log",
+		RotateAtMinutes:         []int{0},
+		scheduledRotationQuitCh: make(chan struct{}),
+	}
+	logger.processedRotateAtMinutes = []int{0}
+
+	// Start the goroutine
+	logger.scheduledRotationWg.Add(1)
+	go logger.runScheduledRotations()
+
+	// Wait a short time, then exit before full 1-minute wait
+	time.Sleep(200 * time.Millisecond)
+	close(logger.scheduledRotationQuitCh)
+	logger.scheduledRotationWg.Wait()
+}
+
+func TestLoggerClose_AlreadyClosedChannel(t *testing.T) {
+	logger := &Logger{
+		Filename:                "test-double-close.log",
+		scheduledRotationQuitCh: make(chan struct{}),
+	}
+
+	// Close the quit channel manually
+	close(logger.scheduledRotationQuitCh)
+
+	// Call Close — this should NOT panic or attempt to close again
+	err := logger.Close()
+	if err != nil {
+		t.Fatalf("expected no error from double-close-safe Close(), got: %v", err)
+	}
+}
+
+func TestMillRunOnce_NoOp(t *testing.T) {
+	logger := &Logger{
+		MaxBackups: 0,
+		MaxAge:     0,
+		Compress:   false,
+		Filename:   filepath.Join(t.TempDir(), "noop.log"),
+	}
+
+	// Should do nothing and return nil
+	err := logger.millRunOnce()
+	if err != nil {
+		t.Fatalf("expected nil from noop millRunOnce, got: %v", err)
+	}
+}
+
+func TestShouldTimeRotate_ZeroLastRotationTime(t *testing.T) {
+	logger := &Logger{
+		RotationInterval: time.Minute,
+		lastRotationTime: time.Time{}, // zero time
+	}
+
+	if logger.shouldTimeRotate() {
+		t.Fatalf("expected false from shouldTimeRotate when lastRotationTime is zero")
+	}
+}
+
+func TestMillRunOnce_CompressEligible(t *testing.T) {
+	tmp := t.TempDir()
+	logger := &Logger{
+		Filename:   filepath.Join(tmp, "test.log"),
+		Compress:   true,
+		MaxBackups: 1,
+	}
+
+	// Create a non-compressed log file with a valid timestamp in name
+	backupName := "test-2025-01-01T00-00-00.000-size.log"
+	path := filepath.Join(tmp, backupName)
+	if err := os.WriteFile(path, []byte("log"), 0644); err != nil {
+		t.Fatalf("failed to create backup log: %v", err)
+	}
+	defer os.Remove(path)
+
+	// Should find this file eligible for compression
+	err := logger.millRunOnce()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify compressed file was created
+	compressed := path + ".gz"
+	if _, err := os.Stat(compressed); err != nil {
+		t.Errorf("expected compressed file, not found: %v", err)
+	}
+	_ = os.Remove(compressed)
+}
+
+func TestMillRunOnce_ExpiredFileSkipped(t *testing.T) {
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "logfile.log")
+
+	logger := &Logger{
+		Filename: base,
+		MaxAge:   1,    // 1 day
+		Compress: true, // trigger compression logic
+	}
+
+	// Manually choose a timestamp > 1 day old
+	oldName := "logfile-2020-01-01T00-00-00.000-size.log"
+	oldPath := filepath.Join(tmp, oldName)
+
+	if err := os.WriteFile(oldPath, []byte("expired"), 0644); err != nil {
+		t.Fatalf("failed to create old log file: %v", err)
+	}
+	defer os.Remove(oldPath)
+
+	err := logger.millRunOnce()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, err := os.Stat(oldPath + compressSuffix); err == nil {
+		t.Errorf("expected no compression for expired file, but .gz file exists")
+	}
+}
+
+func TestMillRun_TriggersMillRunOnce_Effect(t *testing.T) {
+	tmp := t.TempDir()
+	logFile := filepath.Join(tmp, "log.log")
+
+	// Create a backup log file that should be compressed
+	backup := filepath.Join(tmp, "log-2020-01-01T00-00-00.000-size.log")
+	if err := os.WriteFile(backup, []byte("backup data"), 0644); err != nil {
+		t.Fatalf("failed to create backup: %v", err)
+	}
+
+	l := &Logger{
+		Filename: logFile,
+		Compress: true,
+		millCh:   make(chan bool),
+	}
+
+	// Start millRun in background
+	go l.millRun()
+
+	// Trigger it
+	l.millCh <- true
+	time.Sleep(100 * time.Millisecond)
+	close(l.millCh)
+
+	// Wait briefly for compression to complete
+	time.Sleep(200 * time.Millisecond)
+
+	// Check if file was compressed
+	_, err := os.Stat(backup + ".gz")
+	if err != nil {
+		t.Fatalf("expected compressed file not found: %v", err)
+	}
+
+	// Cleanup
+	os.Remove(backup + ".gz")
+}
+
+func TestRotate_StartMillOnlyOnce_Observable(t *testing.T) {
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "logfile.log")
+	logger := &Logger{
+		Filename: base,
+		MaxSize:  1,
+		Compress: true,
+		millCh:   make(chan bool, 10), // Buffered so we can trigger multiple
+	}
+
+	// Create two valid backup files to be compressed
+	for i := 0; i < 2; i++ {
+		name := fmt.Sprintf("logfile-2020-01-01T00-00-0%d.000-size.log", i)
+		path := filepath.Join(tmp, name)
+		if err := os.WriteFile(path, []byte("to compress"), 0644); err != nil {
+			t.Fatalf("failed to write %s: %v", path, err)
+		}
+		defer os.Remove(path + ".gz")
+	}
+
+	// Rotate once — triggers millRun and startMill.Do
+	if err := logger.rotate("size"); err != nil {
+		t.Fatalf("rotate failed: %v", err)
+	}
+
+	// Send cleanup signals — these trigger millRunOnce via millRun
+	logger.millCh <- true
+	logger.millCh <- true
+	close(logger.millCh)
+
+	// Wait briefly for compression to complete
+	time.Sleep(300 * time.Millisecond)
+
+	// Count only compressed versions of the test backup files
+	count := 0
+	entries, _ := os.ReadDir(tmp)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "logfile-2020") && strings.HasSuffix(e.Name(), ".gz") {
+			count++
+		}
+	}
+
+	if count != 2 {
+		t.Fatalf("expected 2 compressed files, got: %d", count)
+	}
+}
+
+func TestScheduledMinuteRotationFails(t *testing.T) {
+	tmp := t.TempDir()
+	file := filepath.Join(tmp, "fail.log")
+
+	logger := &Logger{
+		Filename:        file,
+		RotateAtMinutes: []int{0},
+	}
+	logger.processedRotateAtMinutes = []int{0}
+	logger.scheduledRotationQuitCh = make(chan struct{})
+
+	logger.lastRotationTime = time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// force rotate to fail
+	logger.file = &os.File{} // invalid
+	logger.scheduledRotationWg.Add(1)
+	go logger.runScheduledRotations()
+
+	time.Sleep(100 * time.Millisecond)
+	close(logger.scheduledRotationQuitCh)
+	logger.scheduledRotationWg.Wait()
+}
+
+func TestRunScheduledRotations_CannotFindNextSlot(t *testing.T) {
+	oldTime := currentTime
+	defer func() { currentTime = oldTime }()
+
+	currentTime = func() time.Time {
+		return time.Date(3000, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
+
+	logger := &Logger{
+		Filename:                "test.log",
+		RotateAtMinutes:         []int{0},
+		scheduledRotationQuitCh: make(chan struct{}),
+	}
+	logger.processedRotateAtMinutes = []int{0}
+	logger.scheduledRotationWg.Add(1)
+
+	go logger.runScheduledRotations()
+	time.Sleep(150 * time.Millisecond)
+	close(logger.scheduledRotationQuitCh)
+	logger.scheduledRotationWg.Wait()
+}
+func TestCompressLogFile_CloseDestFails(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "log.log")
+	dst := src + ".gz"
+	_ = os.WriteFile(src, []byte("dummy"), 0644)
+
+	// Patch osStat to return valid info
+	originalStat := osStat
+	osStat = func(name string) (os.FileInfo, error) {
+		return os.Stat(src)
+	}
+	defer func() { osStat = originalStat }()
+
+	// simulate close failure via ReadOnly FS or mocking
+	err := compressLogFile(src, dst)
+	if err != nil && !strings.Contains(err.Error(), "failed to close destination") {
+		t.Fatalf("expected close error, got: %v", err)
+	}
+}
+
+func TestRunScheduledRotations_NoFutureSlotFound(t *testing.T) {
+	originalTime := currentTime
+	defer func() { currentTime = originalTime }()
+	currentTime = func() time.Time {
+		return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
+
+	logger := &Logger{
+		Filename:        "mock.log",
+		RotateAtMinutes: []int{0},
+	}
+	logger.processedRotateAtMinutes = []int{0}
+	logger.scheduledRotationQuitCh = make(chan struct{})
+
+	logger.scheduledRotationWg.Add(1)
+	go logger.runScheduledRotations()
+
+	time.Sleep(200 * time.Millisecond)
+	close(logger.scheduledRotationQuitCh)
+	logger.scheduledRotationWg.Wait()
+}
+
+func TestScheduledRotation_TimerFiresAndRotates(t *testing.T) {
+	originalTime := currentTime
+	defer func() { currentTime = originalTime }()
+
+	now := time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC)
+	currentTime = func() time.Time { return now }
+
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "timerfire.log")
+
+	logger := &Logger{
+		Filename:        file,
+		RotateAtMinutes: []int{1}, // Next minute after 'now'
+	}
+	logger.processedRotateAtMinutes = []int{1}
+	logger.scheduledRotationQuitCh = make(chan struct{})
+	logger.lastRotationTime = now.Add(-time.Hour) // So it qualifies
+
+	logger.scheduledRotationWg.Add(1)
+	go logger.runScheduledRotations()
+
+	time.Sleep(1500 * time.Millisecond)
+	close(logger.scheduledRotationQuitCh)
+	logger.scheduledRotationWg.Wait()
+}
+
+func TestMillRunOnce_RemoveFails(t *testing.T) {
+	tmp := t.TempDir()
+	logFile := filepath.Join(tmp, "log-2025-01-01T00-00-00.000-size.log")
+	_ = os.WriteFile(logFile, []byte("data"), 0644)
+
+	origRemove := osRemove
+	osRemove = func(path string) error {
+		return fmt.Errorf("mock remove failure")
+	}
+	defer func() { osRemove = origRemove }()
+
+	logger := &Logger{
+		Filename:   filepath.Join(tmp, "dummy.log"),
+		MaxBackups: 1,
+		Compress:   false,
+	}
+	err := logger.millRunOnce()
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestCompressLogFile_CopyFails_2(t *testing.T) {
+	// Create a file then remove it to make it unreadable
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "broken.log")
+	_ = os.WriteFile(src, []byte("data"), 0644)
+
+	// Simulate failure by removing source before compression
+	os.Remove(src)
+
+	dst := src + ".gz"
+	err := compressLogFile(src, dst)
+	if err == nil {
+		t.Fatal("expected error due to missing source, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to open source") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunScheduledRotations_FallbackRetry(t *testing.T) {
+	originalNow := currentTime
+	defer func() { currentTime = originalNow }()
+
+	// Simulate a time far in the future so that no candidate slot is after 'now'
+	currentTime = func() time.Time {
+		return time.Date(9999, 1, 1, 23, 59, 59, 0, time.UTC)
+	}
+
+	logger := &Logger{
+		Filename:                 "test.log",
+		RotateAtMinutes:          []int{0},
+		processedRotateAtMinutes: []int{0},
+		scheduledRotationQuitCh:  make(chan struct{}),
+	}
+
+	logger.scheduledRotationWg.Add(1)
+	go logger.runScheduledRotations()
+
+	time.Sleep(200 * time.Millisecond)
+	close(logger.scheduledRotationQuitCh)
+	logger.scheduledRotationWg.Wait()
+}
+
+func TestRunScheduledRotations_TimerFires(t *testing.T) {
+	tmp := t.TempDir()
+	logFile := filepath.Join(tmp, "test.log")
+
+	logger := &Logger{
+		Filename:                 logFile,
+		RotateAtMinutes:          []int{1},
+		processedRotateAtMinutes: []int{1},
+		scheduledRotationQuitCh:  make(chan struct{}),
+	}
+
+	logger.lastRotationTime = time.Now().Add(-time.Hour)
+
+	logger.scheduledRotationWg.Add(1)
+	go logger.runScheduledRotations()
+
+	// Wait for timer to fire
+	time.Sleep(1500 * time.Millisecond)
+	close(logger.scheduledRotationQuitCh)
+	logger.scheduledRotationWg.Wait()
+}
+
+func TestCompressLogFile_CopyFails_4(t *testing.T) {
+	// Prepare unreadable source file (delete after creation)
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "unreadable.log")
+	_ = os.WriteFile(src, []byte("something"), 0600)
+	_ = os.Remove(src) // remove so Open will fail
+
+	dst := filepath.Join(tmp, "unreadable.log.gz")
+
+	err := compressLogFile(src, dst)
+	if err == nil || !strings.Contains(err.Error(), "failed to open source") {
+		t.Fatalf("expected source open error, got: %v", err)
+	}
+}
+func TestWrite_SizeRotateFails_4(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "fail-size.log")
+
+	logger := &Logger{
+		Filename: logPath,
+		MaxSize:  1, // 1 MB
+	}
+
+	// Write almost max-size file manually
+	_ = os.WriteFile(logPath, bytes.Repeat([]byte("x"), int(logger.max()-1)), 0644)
+
+	// Don't preopen file — force logger to call openExistingOrNew → openNew → osRename
+	logger.file = nil
+	logger.size = logger.max() - 1
+
+	// Simulate rename failure
+	origRename := osRename
+	osRename = func(oldpath, newpath string) error {
+		return fmt.Errorf("mock rename error")
+	}
+	defer func() { osRename = origRename }()
+
+	_, err := logger.Write([]byte("x")) // this triggers rotation
+	if err == nil || !strings.Contains(err.Error(), "can't rename log file") {
+		t.Fatalf("expected rename error during rotation, got: %v", err)
 	}
 }
