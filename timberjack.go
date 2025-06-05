@@ -144,6 +144,8 @@ var (
 	megabyte = 1024 * 1024
 
 	osRename = os.Rename
+
+	osRemove = os.Remove
 )
 
 // Write implements io.Writer.
@@ -660,7 +662,7 @@ func (l *Logger) millRunOnce() error {
 		finalUniqueRemovals[f.Name()] = f
 	}
 	for _, f := range finalUniqueRemovals {
-		errRemove := os.Remove(filepath.Join(l.dir(), f.Name()))
+		errRemove := osRemove(filepath.Join(l.dir(), f.Name()))
 		if errRemove != nil && !os.IsNotExist(errRemove) { // Log error if removal failed and file wasn't already gone
 			fmt.Fprintf(os.Stderr, "timberjack: [%s] failed to remove old log file %s: %v\n", l.Filename, f.Name(), errRemove)
 		}
@@ -817,7 +819,7 @@ func compressLogFile(src, dst string) error {
 		// Error during copy. Attempt to clean up.
 		_ = gzWriter.Close() // Try to close gzip writer
 		_ = dstFile.Close()  // Try to close destination file
-		_ = os.Remove(dst)   // Try to remove potentially partial destination file
+		_ = osRemove(dst)    // Try to remove potentially partial destination file
 		return fmt.Errorf("failed to copy data to gzip writer for %s: %w", dst, err)
 	}
 
@@ -825,7 +827,7 @@ func compressLogFile(src, dst string) error {
 	// to the underlying writer (dstFile's OS buffer).
 	if err = gzWriter.Close(); err != nil {
 		_ = dstFile.Close() // Try to close destination file
-		_ = os.Remove(dst)  // Try to remove destination file
+		_ = osRemove(dst)   // Try to remove destination file
 		return fmt.Errorf("failed to close gzip writer for %s: %w", dst, err)
 	}
 
@@ -851,7 +853,7 @@ func compressLogFile(src, dst string) error {
 	}
 
 	// Finally, after successful compression and closing (and optional chown), remove the original source file.
-	if err = os.Remove(src); err != nil {
+	if err = osRemove(src); err != nil {
 		// This is a more significant error if the original isn't removed, as it might be re-processed.
 		return fmt.Errorf("failed to remove original source log file %s after compression: %w", src, err)
 	}
