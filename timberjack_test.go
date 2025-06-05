@@ -1304,3 +1304,77 @@ func TestCompressLogFile_CopyFails(t *testing.T) {
 		t.Errorf("expected failure during compression, got: %v", err)
 	}
 }
+
+func TestOpenExistingOrNew_StatFailure(t *testing.T) {
+	originalStat := osStat
+	defer func() { osStat = originalStat }()
+
+	osStat = func(_ string) (os.FileInfo, error) {
+		return nil, fmt.Errorf("mock stat failure")
+	}
+
+	logger := &Logger{Filename: "somefile.log"}
+	logger.millCh = make(chan bool, 1) // prevent nil panic
+	err := logger.openExistingOrNew(10)
+	if err == nil || !strings.Contains(err.Error(), "error getting log file info") {
+		t.Fatalf("expected stat failure, got: %v", err)
+	}
+}
+
+func TestOpenNew_OpenFileFails(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a file where a directory is expected
+	fileAsDir := filepath.Join(tmpDir, "not_a_dir")
+	err := os.WriteFile(fileAsDir, []byte("I am a file, not a dir"), 0644)
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	// Attempt to use that file as a directory
+	badPath := filepath.Join(fileAsDir, "should_fail.log")
+
+	logger := &Logger{Filename: badPath}
+	err = logger.openNew("size")
+
+	if err == nil || !strings.Contains(err.Error(), "can't make directories") {
+		t.Fatalf("expected mkdir failure, got: %v", err)
+	}
+}
+
+func TestRunScheduledRotations_NoFutureSlot(t *testing.T) {
+	originalTime := currentTime
+	defer func() { currentTime = originalTime }()
+
+	currentTime = func() time.Time {
+		// Always return a time far in the past
+		return time.Date(1999, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
+
+	logger := &Logger{
+		Filename:                "invalid.log",
+		RotateAtMinutes:         []int{0},
+		scheduledRotationQuitCh: make(chan struct{}),
+	}
+	logger.processedRotateAtMinutes = []int{0}
+	logger.scheduledRotationWg.Add(1)
+
+	go logger.runScheduledRotations()
+
+	time.Sleep(200 * time.Millisecond)
+	close(logger.scheduledRotationQuitCh)
+	logger.scheduledRotationWg.Wait()
+}
+
+func TestTimeFromName_MalformedFilename(t *testing.T) {
+	logger := &Logger{Filename: "foo.log"}
+	prefix, ext := logger.prefixAndExt()
+
+	// Missing final hyphen separator, so no reason part
+	invalid := "foo-20200101T000000000.log"
+
+	_, err := logger.timeFromName(invalid, prefix, ext)
+	if err == nil || !strings.Contains(err.Error(), "malformed backup filename") {
+		t.Fatalf("expected malformed filename error, got: %v", err)
+	}
+}
