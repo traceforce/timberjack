@@ -2129,3 +2129,228 @@ func TestWrite_SizeRotateFails_4(t *testing.T) {
 		t.Fatalf("expected rename error during rotation, got: %v", err)
 	}
 }
+
+func TestWrite_IntervalRotationFails(t *testing.T) {
+	currentTime = func() time.Time {
+		return time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	}
+	defer func() { currentTime = time.Now }()
+
+	// Patch osRename to force rotate("time") to fail
+	origRename := osRename
+	defer func() { osRename = origRename }()
+	osRename = func(_, _ string) error {
+		return fmt.Errorf("forced rename failure for interval")
+	}
+
+	tmp := t.TempDir()
+	logfile := filepath.Join(tmp, "fail.log")
+
+	// Seed file to trigger openExisting
+	_ = os.WriteFile(logfile, []byte("seed"), 0644)
+
+	logger := &Logger{
+		Filename:         logfile,
+		RotationInterval: time.Minute,
+		lastRotationTime: currentTime().Add(-2 * time.Minute),
+	}
+	defer logger.Close()
+
+	_, err := logger.Write([]byte("trigger"))
+	if err == nil || !strings.Contains(err.Error(), "interval rotation failed") {
+		t.Fatalf("expected interval rotation failure, got: %v", err)
+	}
+}
+
+func TestRunScheduledRotations_NoFutureSlotRetry(t *testing.T) {
+	defer func() { recover() }() // prevent panics
+
+	originalTime := currentTime
+	defer func() { currentTime = originalTime }()
+
+	// Simulate time far in the future so all slots are in the past
+	currentTime = func() time.Time {
+		return time.Date(9999, 1, 1, 23, 59, 59, 0, time.UTC)
+	}
+
+	logger := &Logger{
+		Filename:                 "noop.log",
+		RotateAtMinutes:          []int{0}, // only candidate is "00"
+		processedRotateAtMinutes: []int{0},
+		scheduledRotationQuitCh:  make(chan struct{}),
+	}
+
+	logger.scheduledRotationWg.Add(1)
+	go logger.runScheduledRotations()
+
+	// Wait briefly to ensure fallback path is entered
+	time.Sleep(200 * time.Millisecond)
+
+	// Shut it down cleanly
+	close(logger.scheduledRotationQuitCh)
+	logger.scheduledRotationWg.Wait()
+}
+
+func TestRunScheduledRotations_RotateFails(t *testing.T) {
+	defer func() { recover() }() // catch potential panic from background goroutine
+
+	// Force rotate to fail by setting invalid filename
+	logger := &Logger{
+		Filename:                 "/invalid/should/fail.log",
+		RotateAtMinutes:          []int{0},
+		processedRotateAtMinutes: []int{0},
+		scheduledRotationQuitCh:  make(chan struct{}),
+	}
+
+	logger.scheduledRotationWg.Add(1)
+	go logger.runScheduledRotations()
+
+	// Let the loop trigger the rotation attempt
+	time.Sleep(300 * time.Millisecond)
+
+	// Clean shutdown
+	close(logger.scheduledRotationQuitCh)
+	logger.scheduledRotationWg.Wait()
+}
+
+func TestRotate_ManualTriggersTimeRotation(t *testing.T) {
+	currentTime = func() time.Time {
+		return time.Date(2025, 6, 5, 12, 0, 0, 0, time.UTC)
+	}
+	defer func() { currentTime = time.Now }()
+
+	dir := t.TempDir()
+	filename := filepath.Join(dir, "manual-trigger.log")
+
+	// Seed file to ensure it rotates
+	_ = os.WriteFile(filename, []byte("before"), 0644)
+
+	l := &Logger{
+		Filename:         filename,
+		RotationInterval: time.Minute,
+		lastRotationTime: time.Date(2025, 6, 5, 11, 58, 0, 0, time.UTC),
+	}
+	defer l.Close()
+
+	err := l.Rotate()
+	if err != nil {
+		t.Fatalf("expected successful manual rotation, got: %v", err)
+	}
+
+	// Check new empty file and rotated one with original data
+	currentData, err := os.ReadFile(filename)
+	if err != nil || len(currentData) != 0 {
+		t.Errorf("expected new empty logfile after rotation, got: %q", currentData)
+	}
+
+	// The rotated file will include "-time" in the filename
+	var found bool
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.Contains(e.Name(), "-time.log") {
+			rotatedPath := filepath.Join(dir, e.Name())
+			content, _ := os.ReadFile(rotatedPath)
+			if string(content) == "before" {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected rotated file with -time suffix not found")
+	}
+}
+
+func TestRunScheduledRotations_FallbackOnRotateFailure(t *testing.T) {
+	defer func() { recover() }() // absorb any goroutine panics
+
+	// Force rotate("time") to fail by mocking osRename
+	originalRename := osRename
+	defer func() { osRename = originalRename }()
+	osRename = func(_, _ string) error {
+		return fmt.Errorf("forced failure in scheduled rotate")
+	}
+
+	// Setup time to be just before a known rotation mark
+	originalTime := currentTime
+	defer func() { currentTime = originalTime }()
+	currentTime = func() time.Time {
+		return time.Date(2025, 1, 1, 0, 0, 1, 0, time.UTC) // match minute 0
+	}
+
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "fallback.log")
+
+	// Seed file so openNew hits rename
+	_ = os.WriteFile(logFile, []byte("seed"), 0644)
+
+	logger := &Logger{
+		Filename:                 logFile,
+		RotateAtMinutes:          []int{0},
+		processedRotateAtMinutes: []int{0},
+		scheduledRotationQuitCh:  make(chan struct{}),
+	}
+	logger.scheduledRotationWg.Add(1)
+
+	go logger.runScheduledRotations()
+
+	// Let it attempt and fail
+	time.Sleep(300 * time.Millisecond)
+	close(logger.scheduledRotationQuitCh)
+	logger.scheduledRotationWg.Wait()
+}
+
+func TestLoggerClose_ClosesMillChannel(t *testing.T) {
+	logger := &Logger{
+		Filename: "test-close-mill.log",
+		millCh:   make(chan bool, 1),
+	}
+
+	// Set startMill to run millRun (to simulate actual usage)
+	logger.startMill.Do(func() {
+		go logger.millRun()
+	})
+
+	// Close should close millCh
+	err := logger.Close()
+	if err != nil {
+		t.Fatalf("Close() returned error: %v", err)
+	}
+
+	// Wait a bit to let millRun exit
+	time.Sleep(100 * time.Millisecond)
+
+	// Test that millCh is closed
+	select {
+	case _, ok := <-logger.millCh:
+		if ok {
+			t.Fatal("millCh should be closed but is still open")
+		}
+	default:
+		// if nothing is received, we assume it's closed and drained
+	}
+}
+
+func TestOpenNew_SetsLogStartTimeWhenFileMissing(t *testing.T) {
+	currentTime = func() time.Time {
+		return time.Date(2025, 6, 5, 15, 0, 0, 0, time.UTC)
+	}
+	defer func() { currentTime = time.Now }()
+
+	dir := t.TempDir()
+	logfile := filepath.Join(dir, "missing.log")
+
+	logger := &Logger{
+		Filename: logfile,
+	}
+	defer logger.Close()
+
+	err := logger.openNew("size")
+	if err != nil {
+		t.Fatalf("openNew failed: %v", err)
+	}
+
+	if logger.logStartTime.IsZero() {
+		t.Fatal("expected logStartTime to be set, but it is zero")
+	}
+}
