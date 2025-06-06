@@ -1,5 +1,4 @@
-# timberjack [![Go Reference](https://pkg.go.dev/badge/github.com/DeRuina/timberjack.svg)](https://pkg.go.dev/github.com/DeRuina/timberjack) [![Go Report Card](https://goreportcard.com/badge/github.com/DeRuina/timberjack)](https://goreportcard.com/report/github.com/DeRuina/timberjack) ![Audit](https://github.com/DeRuina/timberjack/actions/workflows/audit.yaml/badge.svg) ![Version](https://img.shields.io/github/v/tag/DeRuina/timberjack?sort=semver) [![codecov](https://codecov.io/gh/DeRuina/timberjack/branch/main/graph/badge.svg)](https://codecov.io/gh/DeRuina/timberjack)
-
+# timberjack [![Go Reference](https://pkg.go.dev/badge/github.com/DeRuina/timberjack.svg)](https://pkg.go.dev/github.com/DeRuina/timberjack) [![Go Report Card](https://goreportcard.com/badge/github.com/DeRuina/timberjack)](https://goreportcard.com/report/github.com/DeRuina/timberjack) ![Audit](https://github.com/DeRuina/timberjack/actions/workflows/audit.yaml/badge.svg) ![Version](https://img.shields.io/github/v/tag/DeRuina/timberjack?sort=semver) [![Coverage Status](https://coveralls.io/repos/github/DeRuina/timberjack/badge.svg)](https://coveralls.io/github/DeRuina/timberjack)
 
 
 ### Timberjack is a Go package for writing logs to rolling files.
