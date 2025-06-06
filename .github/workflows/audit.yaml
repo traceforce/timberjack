@@ -35,3 +35,11 @@ jobs:
 
       - name: Run Tests
         run: go test  ./...
+
+      - name: Run coverage
+        run: go test -coverprofile=coverage.txt
+
+      - name: Upload results to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
