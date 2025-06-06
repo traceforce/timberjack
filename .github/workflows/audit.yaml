@@ -33,14 +33,6 @@ jobs:
       - name: Run staticcheck
         run: staticcheck ./...
 
-      - name: Run coverage
-        run: go test -coverpkg=./... -coverprofile=coverage.txt ./...
-
-      - name: Upload results to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-
       - name: Run Unit tests
         run: |
           go test  -covermode atomic -coverprofile=covprofile ./...
