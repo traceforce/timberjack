@@ -33,11 +33,8 @@ jobs:
       - name: Run staticcheck
         run: staticcheck ./...
 
-      - name: Run Tests
-        run: go test  ./...
-
       - name: Run coverage
-        run: go test -coverprofile=coverage.txt
+        run: go test -coverpkg=./... -coverprofile=coverage.txt ./...
 
       - name: Upload results to Codecov
         uses: codecov/codecov-action@v5
