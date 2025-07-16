@@ -894,8 +894,9 @@ func countDigitsAfterDot(layout string) int {
 // n=0 → truncate to seconds, n=3 → milliseconds, n=6 → microseconds, etc.
 func truncateFractional(t time.Time, n int) (time.Time, error) {
 	if n < 0 || n > 9 {
-		return time.Now(), errors.New("n must be between 0 and 9")
+		return time.Time{}, fmt.Errorf("unsupported fractional precision: %d", n)
 	}
+
 	// number of nanoseconds to keep
 	factor := math.Pow10(9 - n) // e.g. for n=3, factor=10^(9-3)=1,000,000
 
