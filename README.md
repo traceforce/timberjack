@@ -89,8 +89,7 @@ type Logger struct {
     Compress         bool          // Compress rotated logs (gzip)
     RotationInterval time.Duration // Rotate after this duration (if > 0)
     RotateAtMinutes []int          // Specific minutes within an hour (0-59) to trigger a rotation.
-    BackupTimeFormat string        // OPTIONAL with default value : 2006-01-02T15-04-05.000
-}
+    BackupTimeFormat string        // Optional. If unset or invalid, defaults to 2006-01-02T15-04-05.000 (with fallback warning).
 ```
 
 
@@ -119,7 +118,7 @@ For example:
 
 * **`BackupTimeFormat` Values must be valid and should not change after initialization**  
   The `BackupTimeFormat` value **must be valid** and must follow the timestamp layout rules
-  specified here: https://pkg.go.dev/time#pkg-constants. `BackupTimeFormat` supports more formats but it's recommended to use standard formats. If **invalid** value is configured, then the default time format is used : `2006-01-02T15-04-05.000`. 
+  specified here: https://pkg.go.dev/time#pkg-constants. `BackupTimeFormat` supports more formats but it's recommended to use standard formats. If an **invalid** `BackupTimeFormat` is configured, Timberjack logs a warning to `os.Stderr` and falls back to the default format: `2006-01-02T15-04-05.000`. Rotation will still work, but the resulting filenames may not match your expectations.
 
 * **Silent Ignoring of Invalid `RotateAtMinutes` Values**  
   Values outside the valid range (`0–59`) or duplicates in `RotateAtMinutes` are silently ignored. No warnings or errors will be logged. This allows the program to continue safely, but the rotation behavior may not match your expectations if values are invalid.
