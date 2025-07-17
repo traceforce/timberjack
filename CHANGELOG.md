@@ -1,23 +1,5 @@
 # Changelog
 
-## [2.0.1](https://github.com/DeRuina/timberjack/compare/v2.0.0...v2.0.1) (2025-07-16)
-
-
-### Bug Fixes
-
-* truncateFractional bug fix ([9a6f908](https://github.com/DeRuina/timberjack/commit/9a6f908d270ddfa45df66621b0b12b1ff44ab28f))
-
-## [2.0.0](https://github.com/DeRuina/timberjack/compare/v1.3.0...v2.0.0) (2025-07-16)
-
-
-### ⚠ BREAKING CHANGES
-
-* `BackupTimeFormat` field is now required for Logger instance to work. Returns error if invalid value is passed.
-
-### Features
-
-* Rotation Suffix Time Format ([e2c2211](https://github.com/DeRuina/timberjack/commit/e2c22115ae301c034e07c703ab9729d25b170a49))
-
 ## [1.3.0](https://github.com/DeRuina/timberjack/compare/v1.2.0...v1.3.0) (2025-06-04)
 
 
