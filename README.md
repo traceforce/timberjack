@@ -49,7 +49,7 @@ func main() {
 		LocalTime:  true,           // default: false (use UTC)
 		RotationInterval: time.Hour * 24, // Rotate daily if no other rotation met
 		RotateAtMinutes: []int{0, 15, 30, 45}, // Also rotate at HH:00, HH:15, HH:30, HH:45
-    BackupTimeFormat: "2006-01-02-15-04-05" // Rotated files will have format <logfilename>-2006-01-02-15-04-05-<rotationCriterion>-timberjack.log
+   	 	BackupTimeFormat: "2006-01-02-15-04-05" // Rotated files will have format <logfilename>-2006-01-02-15-04-05-<rotationCriterion>-timberjack.log
 	}
 	log.SetOutput(logger)
 	defer logger.Close() // Ensure logger is closed on application exit to stop goroutines
