@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 )
@@ -41,6 +42,18 @@ const (
 
 // ensure we always implement io.WriteCloser
 var _ io.WriteCloser = (*Logger)(nil)
+
+// SafeClose is a generic function that safely closes a channel of any type.
+// It prevents "panic: close of closed channel" and "panic: close of nil channel".
+//
+// The type parameter [T any] allows this function to work with channels of any element type,
+// for example, chan int, chan string, chan struct{}, etc.
+func safeClose[T any](ch chan T) {
+	defer func() {
+		recover()
+	}()
+	close(ch)
+}
 
 // Logger is an io.WriteCloser that writes to the specified filename.
 //
@@ -150,6 +163,7 @@ type Logger struct {
 	// isBackupTimeFormatValidated flag helps prevent repeated validation checks
 	// on supplied format through configuration
 	isBackupTimeFormatValidated bool
+	isClosed                    uint32
 }
 
 var (
@@ -182,6 +196,26 @@ var (
 func (l *Logger) Write(p []byte) (n int, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	// Handle writes to a closed logger.
+	if atomic.LoadUint32(&l.isClosed) == 1 {
+		// The logger is closed. To ensure the write succeeds, we perform a
+		// single open-write-close cycle. This does not perform rotation
+		// and does not restart the background goroutines. l.file remains nil.
+		file, openErr := os.OpenFile(l.filename(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if openErr != nil {
+			return 0, fmt.Errorf("timberjack: write on closed logger failed to open file: %w", openErr)
+		}
+
+		n, writeErr := file.Write(p)
+
+		closeErr := file.Close()
+
+		if writeErr != nil {
+			return n, writeErr
+		}
+		return n, closeErr
+	}
 
 	// Ensure the scheduled-rotation goroutine is running (if you've still got one).
 	l.ensureScheduledRotationLoopRunning()
@@ -409,32 +443,23 @@ func (l *Logger) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	if atomic.LoadUint32(&l.isClosed) == 1 {
+		return nil // Already closed
+	}
+
+	atomic.StoreUint32(&l.isClosed, 1)
+
 	// Stop and wait for the scheduled rotation goroutine
 	if l.scheduledRotationQuitCh != nil {
-		// Check if quit channel is already closed to prevent panic on double-close
-		alreadyClosed := false
-		select {
-		case _, ok := <-l.scheduledRotationQuitCh:
-			if !ok { // Channel is closed
-				alreadyClosed = true
-			}
-		default: // Channel is open (or nil, but `if l.scheduledRotationQuitCh != nil` handles nil)
-		}
-
-		if !alreadyClosed {
-			close(l.scheduledRotationQuitCh)
-		}
+		safeClose(l.scheduledRotationQuitCh)
 		l.scheduledRotationWg.Wait() // Wait for the goroutine to finish
+		l.scheduledRotationQuitCh = nil
 	}
 
 	// Stop the mill goroutine. Original timberjack closes millCh.
-	// Ensuring this is robust would involve similar WaitGroup logic for mill if it's critical.
 	if l.millCh != nil {
-		// Check if millCh is already closed before trying to close it again.
-		// A simple way is to use sync.Once for closing millCh as well, or just try-close.
-		// For now, assume single close call is handled.
-		close(l.millCh) // This would stop the millRun goroutine if it ranges on millCh.
-		// A select with a default can also try to send a quit signal if millCh structure is different.
+		safeClose(l.millCh)
+		l.millCh = nil
 	}
 
 	return l.closeFile() // Call the internal method to close the file descriptor
@@ -459,6 +484,9 @@ func (l *Logger) closeFile() error {
 func (l *Logger) Rotate() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if atomic.LoadUint32(&l.isClosed) == 1 {
+		return errors.New("logger closed")
+	}
 	// Determine reason for manual Rotate to align with test expectations and original behavior:
 	// If an interval rotation is also due at this moment, label it "time".
 	// Otherwise, label it "size" as a general default for manual rotation (tests often expect this).
@@ -760,6 +788,9 @@ func (l *Logger) millRun() {
 // mill performs post-rotation compression and removal of stale log files,
 // starting the mill goroutine if necessary and sending a signal to it.
 func (l *Logger) mill() {
+	if atomic.LoadUint32(&l.isClosed) == 1 {
+		return // Don't run if logger is closed
+	}
 	l.startMill.Do(func() {
 		l.millCh = make(chan bool, 1) // Buffered channel of 1
 		go l.millRun()
