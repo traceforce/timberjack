@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.4](https://github.com/DeRuina/timberjack/compare/v1.3.3...v1.3.4) (2025-08-05)
+
+### Features
+
+* read group permission on newly created files ([#30](https://github.com/DeRuina/timberjack/issues/30)) ([ee44715](https://github.com/DeRuina/timberjack/commit/ee447152a04d62ae12811a2212815f8960ca0d9d))
+
 ## [1.3.3](https://github.com/DeRuina/timberjack/compare/v1.3.2...v1.3.3) (2025-07-24)
 
 ### Bug Fixes
