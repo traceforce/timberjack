@@ -30,7 +30,7 @@ component that manages log file writing and rotation. It plays well with any log
 
 ## Example
 
-To use timberjack with the standard library's `log` package, including interval-based and scheduled minute-based rotation:
+To use timberjack with the standard library's `log` package, including interval-based and scheduled minute/daily rotation:
 
 ```go
 import (
@@ -41,21 +41,20 @@ import (
 
 func main() {
 	logger := &timberjack.Logger{
-		Filename:   "/var/log/myapp/foo.log", // Choose an appropriate path
-		MaxSize:    500,            // megabytes
-		MaxBackups: 3,              // backups
-		MaxAge:     28,             // days
-		Compress:   true,           // default: false
-		LocalTime:  true,           // default: false (use UTC)
-		RotationInterval: time.Hour * 24, // Rotate daily if no other rotation met
-		RotateAtMinutes: []int{0, 15, 30, 45}, // Also rotate at HH:00, HH:15, HH:30, HH:45
-		RotateAt:        []string{"00:00", "12:00"}, // Also rotate at 00:00 and 12:00 each day
-   	 	BackupTimeFormat: "2006-01-02-15-04-05" // Rotated files will have format <logfilename>-2006-01-02-15-04-05-<rotationCriterion>-timberjack.log
+		Filename:         "/var/log/myapp/foo.log", // Choose an appropriate path
+		MaxSize:          500,                      // megabytes
+		MaxBackups:       3,                        // backups
+		MaxAge:           28,                       // days
+		Compress:         true,                     // default: false
+		LocalTime:        true,                     // default: false (use UTC)
+		RotationInterval: 24 * time.Hour,           // Rotate daily if no other rotation met
+		RotateAtMinutes:  []int{0, 15, 30, 45},     // Also rotate at HH:00, HH:15, HH:30, HH:45
+		RotateAt:         []string{"00:00", "12:00"}, // Also rotate at 00:00 and 12:00 each day
+   		BackupTimeFormat: "2006-01-02-15-04-05",    // // Rotated files will have format <logfilename>-2006-01-02-15-04-05-<reason>.log
 	}
 	log.SetOutput(logger)
 	defer logger.Close() // Ensure logger is closed on application exit to stop goroutines
 
-	// Example log writes
 	log.Println("Application started")
 	// ... your application logic ...
 	log.Println("Application shutting down")
@@ -89,17 +88,18 @@ type Logger struct {
     LocalTime        bool          // Use local time in rotated filenames
     Compress         bool          // Compress rotated logs (gzip)
     RotationInterval time.Duration // Rotate after this duration (if > 0)
-    RotateAtMinutes []int          // Specific minutes within an hour (0-59) to trigger a rotation.
-    RotateAT        []string       // Specific hours within a day (HH:MM) to trigger a rotation
-    BackupTimeFormat string        // Optional. If unset or invalid, defaults to 2006-01-02T15-04-05.000 (with fallback warning).
+    RotateAtMinutes  []int         // Specific minutes within an hour (0–59) to trigger rotation
+    RotateAt         []string      // Specific daily times (HH:MM, 24-hour) to trigger rotation
+    BackupTimeFormat string        // Optional. If unset or invalid, defaults to 2006-01-02T15-04-05.000 (with fallback warning)
+}
 ```
 
 
 ## How Rotation Works
 
 1. **Size-Based**: If a write operation causes the current log file to exceed `MaxSize`, the file is rotated before the write. The backup filename will include `-size` as the reason.
-2. **Time-Based**: If `RotationInterval` is set (e.g., `time.Hour * 24` for daily rotation) and this duration has passed since the last rotation (of any type that updates the interval timer), the file is rotated upon the next write. The backup filename will include `-time` as the reason.
-3. **Scheduled Minute-Based**: If `RotateAtMinutes`/`RotateAt` is configured (e.g., `[]int{0, 30}` the rotation will happen every hour at `HH:00:00` and `HH:30:00`), a dedicated goroutine will trigger a rotation when the current time matches one of these minute marks. This rotation also uses `-time` as the reason in the backup filename.
+2. **Time-Based (Interval)**: If `RotationInterval` is set (e.g., `24 * time.Hour` for daily rotation) and this duration has passed since the last rotation (of any type that updates the interval timer), the file is rotated upon the next write. The backup filename will include `-time` as the reason.
+3. **Scheduled (Clock-Aligned)**: If `RotateAtMinutes` and/or `RotateAt` are configured (e.g., `[]int{0,30}` → rotate at `HH:00` and `HH:30`; or `[]string{"00:00"}` → rotate at midnight), a background goroutine triggers rotation at those times. These rotations use `-time` as the reason.
 4. **Manual**: You can call `Logger.Rotate()` directly to force a rotation at any time. The reason in the backup filename will be `"-time"` if an interval rotation was also due, otherwise it defaults to `"-size"`.
 
 Rotated files are renamed using the pattern:
@@ -113,8 +113,20 @@ For example:
 ```
 /var/log/myapp/foo-2025-04-30T15-00-00.000-size.log
 /var/log/myapp/foo-2025-04-30T22-15-42.123-time.log
-/var/log/myapp/foo-2025-05-01T10:30:00.000-time.log.gz (if scheduled at HH:30 and compressed)
+/var/log/myapp/foo-2025-05-01T10-30-00.000-time.log.gz  (if compressed)
 ```
+
+### Rotation modes at a glance
+
+| Mode                           | Configure with                                | Trigger                                                             | Anchor                       | Background goroutine? | Rotates with zero writes? | Updates `lastRotationTime` | Backup suffix                                             | Notes                                                                                                             |
+| ------------------------------ | --------------------------------------------- | ------------------------------------------------------------------- | ---------------------------- | :-------------------: | :-----------------------: | :------------------------: | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| **Size-based**                 | `MaxSize`                                     | A write would exceed `MaxSize`                                      | N/A                          |           No          |             No            |           **No**           | `-size`                                                   | Always active. A single write larger than `MaxSize` returns an error.                                             |
+| **Interval-based**             | `RotationInterval > 0`                        | On **next write** after `now - lastRotationTime ≥ RotationInterval` | Duration since last rotation |           No          |             No            |     **Yes** (to `now`)     | `-time`                                                   | “Every N” rotations; not aligned to the wall clock.                                                               |
+| **Scheduled minute-based**     | `RotateAtMinutes` (e.g. `[]int{0,30}`)        | At each `HH:MM` where minute matches                                | Clock minute marks           |        **Yes**        |          **Yes**          |           **Yes**          | `-time`                                                   | Expands minutes across all 24 hours. Invalid minutes are ignored **with a warning**. De-duplicated vs `RotateAt`. |
+| **Scheduled daily fixed time** | `RotateAt` (e.g. `[]string{"00:00","12:00"}`) | At each listed `HH:MM` daily                                        | Clock minute marks           |        **Yes**        |          **Yes**          |           **Yes**          | `-time`                                                   | Ideal for “rotate at midnight”. De-duplicated vs `RotateAtMinutes`.                                               |
+| **Manual**                     | `Logger.Rotate()`                             | When called                                                         | Immediate                    |           No          |            N/A            |           **No**           | `-time` if an interval rotation is due; otherwise `-size` | Handy for SIGHUP.                                                                                                 |
+
+> **Time zone:** scheduling and filename timestamps use UTC by default, or local time if `LocalTime: true`.
 
 ## ⚠️ Rotation Notes & Warnings
 
@@ -125,17 +137,17 @@ For example:
 * **Silent Ignoring of Invalid `RotateAtMinutes`/`RotateAt` Values**  
   Values outside the valid range (`0–59`) for `RotateAtMinutes` or invalid time (`HH:MM`) for `RotateAt` or duplicates in `RotateAtMinutes`/`RotateAt` are silently ignored. No warnings or errors will be logged. This allows the program to continue safely, but the rotation behavior may not match your expectations if values are invalid.
 
-* **Logger Must Be Closed**  
+* **Logger Must Be Closed**
   Always call `logger.Close()` when done logging. This shuts down internal goroutines used for scheduled rotation and cleanup. Failing to close the logger can result in orphaned background processes, open file handles, and memory leaks.
 
-* **Size-Based Rotation Is Always Active**  
+* **Size-Based Rotation Is Always Active**
   Regardless of `RotationInterval` or `RotateAtMinutes`/`RotateAt`, size-based rotation is always enforced. If a write causes the log to exceed `MaxSize` (default: 100MB), it triggers an immediate rotation.
 
-* **If Only `RotationInterval` Is Set**  
-  The logger will rotate after the configured time has passed since the **last rotation**, regardless of file size progression.
+* **If Only `RotationInterval` Is Set**
+  The logger rotates after the configured time has passed since the **last rotation**, regardless of file size.
 
-* **If Only `RotateAtMinutes`/`RotateAt` Is Set**  
-  The logger will rotate **at the clock times** specified, regardless of file size or duration passed. This is handled by a background goroutine. Rotated logs might be even empty if no write has occurred. 
+* **If Only `RotateAtMinutes`/`RotateAt` Is Set**
+  The logger rotates **at the clock times** specified, regardless of file size or duration passed. This is handled by a background goroutine. Rotated logs can be empty if no write has occurred.
 
 * **If Both Are Set**  
   Both time-based strategies (`RotationInterval` and `RotateAtMinutes`) are evaluated. Whichever condition occurs first triggers rotation. However:
@@ -148,16 +160,15 @@ For example:
 ## Log Cleanup
 
 When a new log file is created:
-- Older backups beyond `MaxBackups` are deleted.
-- Files older than `MaxAge` days are deleted.
-- If `Compress` is true, older files are gzip-compressed.
 
+* Older backups beyond `MaxBackups` are deleted.
+* Files older than `MaxAge` days are deleted.
+* If `Compress` is true, older files are gzip-compressed.
 
 ## Contributing
 
-We welcome contributions!  
+We welcome contributions!
 Please see our [contributing guidelines](CONTRIBUTING.md) before submitting a pull request.
-
 
 ## License
 
