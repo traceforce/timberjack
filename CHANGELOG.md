@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.5](https://github.com/DeRuina/timberjack/compare/v1.3.4...v1.3.5) (2025-08-19)
+
+### Features
+
+* config option for daily rotation ([#33](https://github.com/DeRuina/timberjack/issues/33)) ([16955b7](https://github.com/DeRuina/timberjack/commit/16955b7e540f9562122590ae05f591dd43cd5860))
+
+* bump go version to 1.21  ([9bdd903](https://github.com/DeRuina/timberjack/commit/9bdd9038638e72a7fb330fe97f8c730864b9cbd5))
+
+### Changed
+
+* update README  ([4203c93](https://github.com/DeRuina/timberjack/commit/4203c93e80ece5d83ec387170bee3f5a69253daf))
+
 ## [1.3.4](https://github.com/DeRuina/timberjack/compare/v1.3.3...v1.3.4) (2025-08-05)
 
 ### Features
