@@ -1,4 +1,4 @@
-module github.com/DeRuina/timberjack
+module github.com/traceforce/timberjack
 
 go 1.21
 
