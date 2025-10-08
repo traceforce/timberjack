@@ -177,6 +177,12 @@ type Logger struct {
 	// logFiles are the names of the finalized log files
 	Callback func(dir string, logFiles []string)
 
+	// Perform rotation when close
+	RotateOnClose bool
+
+	// always delete zero size log files
+	DeleteZeroSizeLog bool
+
 	// Internal fields
 	size             int64     // current size of the log file
 	file             *os.File  // current log file
@@ -545,7 +551,29 @@ func (l *Logger) Close() error {
 		l.millCh = nil
 	}
 
-	return l.closeFile() // Call the internal method to close the file descriptor
+	err := l.closeFile() // Call the internal method to close the file descriptor
+
+	if l.RotateOnClose {
+		// create backup from the active log file
+		if err1 := l.openNew("closing"); err1 != nil {
+			fmt.Fprintf(os.Stderr, "timberjack: [%s] failed to create a backup: %v",
+				l.Filename, err1)
+			if err == nil {
+				err = err1
+			}
+		}
+
+		// force a rotate to happen at the end of close
+		if err1 := l.millRunOnce(); err1 != nil {
+			fmt.Fprintf(os.Stderr, "timberjack: [%s] failed to mill: %v",
+				l.Filename, err1)
+			if err == nil {
+				err = err1
+			}
+		}
+	}
+
+	return err
 }
 
 // closeFile closes the file if it is open. This is an internal method.
@@ -782,8 +810,21 @@ func (l *Logger) millRunOnce() error {
 		return err
 	}
 
-	var filesToProcess = files  // Start with all found old log files
-	var filesToRemove []logInfo // Accumulates files to be deleted
+	// cleanup all the zero size log files, this is to prevent a newer zero size file to close an older
+	// non-zero size file to be deleted due to constraints on # of backup
+	filesToProcess := make([]logInfo, 0, len(files))
+	for _, f := range files {
+		if l.DeleteZeroSizeLog && f.FileInfo.Size() == 0 {
+			errRemove := osRemove(filepath.Join(l.dir(), f.Name()))
+			if errRemove != nil && !os.IsNotExist(errRemove) { // Log error if removal failed and file wasn't already gone
+				fmt.Fprintf(os.Stderr, "timberjack: [%s] failed to remove old log file %s: %v\n", l.Filename, f.Name(), errRemove)
+			}
+			continue
+		}
+		filesToProcess = append(filesToProcess, f)
+	}
+
+	filesToRemove := make([]logInfo, 0, len(filesToProcess)) // Accumulates files to be deleted
 
 	// MaxBackups filtering: Keep files belonging to the MaxBackups newest distinct timestamps
 	if l.MaxBackups > 0 {
