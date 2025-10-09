@@ -553,7 +553,7 @@ func (l *Logger) Close() error {
 
 	err := l.closeFile() // Call the internal method to close the file descriptor
 
-	if l.RotateOnClose && l.file != nil {
+	if l.RotateOnClose {
 		// create backup from the active log file
 		if err1 := l.openNew("closing"); err1 != nil {
 			fmt.Fprintf(os.Stderr, "timberjack: [%s] failed to create a backup: %v",
