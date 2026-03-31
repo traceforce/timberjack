@@ -1146,22 +1146,26 @@ func compressLogFile(src, dst string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open source log file %s for compression: %v", src, err)
 	}
-	// NOTE: Do NOT use `defer srcFile.Close()` here.
+	// We need two things that pull in opposite directions:
 	//
-	// On Windows, a file cannot be deleted while it is still open by any process or
-	// file descriptor. Using `defer` would keep srcFile open until compressLogFile
-	// returns — which means it would still be open when osRemove(src) is called near
-	// the end of this function. This causes osRemove to fail with an "access denied"
-	// or "file in use" error on Windows, leaving the original uncompressed log file
-	// on disk even after successful compression.
+	//  1. All early-return error paths must close srcFile to avoid leaking the file
+	//     descriptor — a plain `defer srcFile.Close()` would handle this naturally.
 	//
-	// The fix is to close srcFile explicitly, right before the osRemove(src) call,
-	// so the file descriptor is released before the delete is attempted. This is safe
-	// because all reads from srcFile (via io.Copy into the compressor) are complete
-	// by that point.
+	//  2. On Windows, a file cannot be deleted while any open file descriptor holds a
+	//     reference to it.  If we relied solely on defer, srcFile would still be open
+	//     when osRemove(src) is called near the end of this function, causing an
+	//     "access denied" / "file in use" error and leaving the original uncompressed
+	//     log file on disk even after successful compression.
 	//
-	// On Linux/macOS this is not strictly required (open files can be unlinked), but
-	// closing before removing is the correct and portable behaviour regardless of OS.
+	// Solution: use a bool flag (srcFileClosed) so that we can close srcFile
+	// explicitly — before osRemove — on the happy path, while the deferred closure
+	// still handles every early-return error path without performing a double-close.
+	srcFileClosed := false
+	defer func() {
+		if !srcFileClosed {
+			_ = srcFile.Close()
+		}
+	}()
 
 	srcInfo, err := osStat(src) // Get FileInfo of the source to use its mode for the new compressed file
 	if err != nil {
@@ -1223,10 +1227,11 @@ func compressLogFile(src, dst string) error {
 		// For now, it's logged, and compression proceeds to remove the source.
 	}
 
-	// Close srcFile explicitly before removing it. See the comment at the top of this
-	// function for why defer is not used: on Windows the file must be closed before it
-	// can be deleted. All reads from srcFile are finished by this point, so closing
-	// here is safe.
+	// Close srcFile before removing it. On Windows the file must be closed before it
+	// can be deleted (see the comment near the top of this function). All reads from
+	// srcFile are finished by this point, so closing here is safe. We set the flag so
+	// the deferred closure above knows not to call Close() a second time.
+	srcFileClosed = true
 	if err = srcFile.Close(); err != nil {
 		return fmt.Errorf("failed to close source log file %s before removal: %w", src, err)
 	}
