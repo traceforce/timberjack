@@ -1146,7 +1146,26 @@ func compressLogFile(src, dst string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open source log file %s for compression: %v", src, err)
 	}
-	defer srcFile.Close()
+	// We need two things that pull in opposite directions:
+	//
+	//  1. All early-return error paths must close srcFile to avoid leaking the file
+	//     descriptor — a plain `defer srcFile.Close()` would handle this naturally.
+	//
+	//  2. On Windows, a file cannot be deleted while any open file descriptor holds a
+	//     reference to it.  If we relied solely on defer, srcFile would still be open
+	//     when osRemove(src) is called near the end of this function, causing an
+	//     "access denied" / "file in use" error and leaving the original uncompressed
+	//     log file on disk even after successful compression.
+	//
+	// Solution: use a bool flag (srcFileClosed) so that we can close srcFile
+	// explicitly — before osRemove — on the happy path, while the deferred closure
+	// still handles every early-return error path without performing a double-close.
+	srcFileClosed := false
+	defer func() {
+		if !srcFileClosed {
+			_ = srcFile.Close()
+		}
+	}()
 
 	srcInfo, err := osStat(src) // Get FileInfo of the source to use its mode for the new compressed file
 	if err != nil {
@@ -1206,6 +1225,15 @@ func compressLogFile(src, dst string) error {
 			filepath.Base(src), dst, errChown, src)
 		// Note: Depending on requirements, a chown failure could be considered critical.
 		// For now, it's logged, and compression proceeds to remove the source.
+	}
+
+	// Close srcFile before removing it. On Windows the file must be closed before it
+	// can be deleted (see the comment near the top of this function). All reads from
+	// srcFile are finished by this point, so closing here is safe. We set the flag so
+	// the deferred closure above knows not to call Close() a second time.
+	srcFileClosed = true
+	if err = srcFile.Close(); err != nil {
+		return fmt.Errorf("failed to close source log file %s before removal: %w", src, err)
 	}
 
 	// Finally, after successful compression and closing (and optional chown), remove the original source file.
