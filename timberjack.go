@@ -1146,7 +1146,22 @@ func compressLogFile(src, dst string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open source log file %s for compression: %v", src, err)
 	}
-	defer srcFile.Close()
+	// NOTE: Do NOT use `defer srcFile.Close()` here.
+	//
+	// On Windows, a file cannot be deleted while it is still open by any process or
+	// file descriptor. Using `defer` would keep srcFile open until compressLogFile
+	// returns — which means it would still be open when osRemove(src) is called near
+	// the end of this function. This causes osRemove to fail with an "access denied"
+	// or "file in use" error on Windows, leaving the original uncompressed log file
+	// on disk even after successful compression.
+	//
+	// The fix is to close srcFile explicitly, right before the osRemove(src) call,
+	// so the file descriptor is released before the delete is attempted. This is safe
+	// because all reads from srcFile (via io.Copy into the compressor) are complete
+	// by that point.
+	//
+	// On Linux/macOS this is not strictly required (open files can be unlinked), but
+	// closing before removing is the correct and portable behaviour regardless of OS.
 
 	srcInfo, err := osStat(src) // Get FileInfo of the source to use its mode for the new compressed file
 	if err != nil {
@@ -1206,6 +1221,14 @@ func compressLogFile(src, dst string) error {
 			filepath.Base(src), dst, errChown, src)
 		// Note: Depending on requirements, a chown failure could be considered critical.
 		// For now, it's logged, and compression proceeds to remove the source.
+	}
+
+	// Close srcFile explicitly before removing it. See the comment at the top of this
+	// function for why defer is not used: on Windows the file must be closed before it
+	// can be deleted. All reads from srcFile are finished by this point, so closing
+	// here is safe.
+	if err = srcFile.Close(); err != nil {
+		return fmt.Errorf("failed to close source log file %s before removal: %w", src, err)
 	}
 
 	// Finally, after successful compression and closing (and optional chown), remove the original source file.
